@@ -1,84 +1,116 @@
 #import <UIKit/UIKit.h>
-#import <rootless.h>
-#import "Header.h"
 
-BOOL TweakEnabled() {
-    if ([[NSUserDefaults standardUserDefaults] valueForKey:EnabledKey] != nil) {
-	return [[NSUserDefaults standardUserDefaults] boolForKey:EnabledKey];
-    }
+#import "Header.h"
+#import "MBFAssets.h"
+#import "MBFOverlay.h"
+#import "MBFThumbnailDetector.h"
+
+#import <YouTubeHeader/ELMView.h>
+#import <YouTubeHeader/ELMNodeController.h>
+
+BOOL TweakEnabled(void) {
+    NSUserDefaults *defaults =
+        [NSUserDefaults standardUserDefaults];
+
+    if ([defaults objectForKey:EnabledKey] != nil)
+        return [defaults boolForKey:EnabledKey];
+
     return YES;
 }
 
-@interface _ASDisplayView : UIView
-@end
+/*
+ * PoomSmart's YouTube tweaks use this general ELM
+ * controller/materialized-instance pattern.
+ *
+ * This is useful for investigating modern YouTube's
+ * UI hierarchy without relying on the old
+ * _ASDisplayView/eml.timestamp implementation.
+ */
+static ELMNodeController *MBFNodeControllerForELMView(
+    ELMView *elmView
+) {
+    if (!elmView)
+        return nil;
 
-int imageCount = 0;
+    id controller = nil;
 
-NSArray *flippableText = @[@23, @37, @46];
+    @try {
+        controller =
+            [elmView valueForKey:@"_strongRootController"];
 
-NSBundle *MrBeastifyBundle() {
-    static NSBundle *bundle = nil;
-    static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-        NSString *tweakBundlePath = [[NSBundle mainBundle] pathForResource:@"MrBeastify" ofType:@"bundle"];
-        if (tweakBundlePath)
-            bundle = [NSBundle bundleWithPath:tweakBundlePath];
-        else
-            bundle = [NSBundle bundleWithPath:ROOT_PATH_NS(@"/Library/Application Support/MrBeastify.bundle")];
-    });
-    return bundle;
-}
-
-NSString *MrBeastifyBundlePath() {
-	return [MrBeastifyBundle() bundlePath];
-}
-
-%hook _ASDisplayView
--(void)layoutSubviews {
-	%orig;
- 
-    if (!TweakEnabled()) return;
-
-	if (![self.accessibilityIdentifier isEqualToString:@"eml.timestamp"]) return;
-
-	for (UIView *subview in self.superview.superview.subviews) {
-		// Ensure it's suitable to add our image
-		if (subview.frame.size.height < 90 || subview.frame.size.height > 300) continue;
-		if (subview.subviews.count != 1) continue;
-  
-        // Decide whether to flip or not
-        BOOL isFlipped = arc4random_uniform(4) == 1;
-
-		// Pick a random image
-		int imageNumber = 1 + arc4random() % (imageCount - 1);
-
-		// from the nsbundle
-		NSString *filepath = [NSString stringWithFormat:@"%@/%d.png", MrBeastifyBundlePath(), imageNumber];
-        
-        if (isFlipped && [flippableText containsObject:[NSNumber numberWithInt:imageNumber]]) {
-			filepath = [NSString stringWithFormat:@"%@/%d_flipped.png", MrBeastifyBundlePath(), imageNumber];
+        if (!controller) {
+            controller =
+                [elmView valueForKey:@"_rootController"];
         }
-		
-		// Create image
-		UIImage *image = [[UIImage alloc] initWithContentsOfFile:ROOT_PATH_NS_VAR(filepath)];
+    }
+    @catch (NSException *exception) {
+        return nil;
+    }
 
-		// Create image view
-		UIImageView *imageView = [[UIImageView alloc] initWithImage:image];
-		imageView.frame = subview.frame; // same size as thumbnail
-		imageView.center = subview.center; // centre of thumbnail
-          if (isFlipped && ![flippableText containsObject:[NSNumber numberWithInt:imageNumber]]) {
-            // Flip the UI Image
-            imageView.transform = CGAffineTransformMakeScale(-1, 1);
-        }
+    if (!controller)
+        return nil;
 
-		[subview addSubview:imageView];
+    if ([controller respondsToSelector:
+            @selector(materializedInstance)]) {
 
-		break;
-	}
+        id materialized =
+            [controller materializedInstance];
+
+        if (materialized)
+            controller = materialized;
+    }
+
+    if ([controller
+            isKindOfClass:%c(ELMNodeController)]) {
+
+        return controller;
+    }
+
+    return nil;
 }
+
+/*
+ * Diagnostic ELM hook.
+ *
+ * This deliberately does NOT inject MrBeast yet.
+ * Its purpose is to identify the actual materialized
+ * thumbnail node/view used by YouTube 20.44.2.
+ */
+%hook ELMView
+
+- (void)didMoveToWindow {
+    %orig;
+
+    if (!TweakEnabled())
+        return;
+
+    ELMNodeController *controller =
+        MBFNodeControllerForELMView(self);
+
+    if (!controller)
+        return;
+
+    NSLog(
+        @"[MrBeastify] ELMView=%@ controller=%@ "
+         "materialized=%@ frame=%@",
+        self,
+        controller,
+        [controller materializedInstance],
+        NSStringFromCGRect(self.frame)
+    );
+}
+
 %end
 
 %ctor {
-	NSBundle *tweakBundle = MrBeastifyBundle();
-	imageCount = (int)[[NSFileManager defaultManager] contentsOfDirectoryAtPath:[tweakBundle bundlePath] error:nil].count;
+    /*
+     * Force asset discovery during initialization so
+     * malformed/missing assets are detected early.
+     */
+    MBFAssets();
+
+    NSLog(
+        @"[MrBeastify] initialized - assets=%lu",
+        (unsigned long)MBFAssets().count
+    );
 }
